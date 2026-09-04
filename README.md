@@ -1,10 +1,58 @@
-# agent-relay plugin template
+# agent-relay-experimental-plugin
 
-> A minimal, working starting point for an [agent-relay](https://github.com/joniba/agent-relay)
-> drop-in plugin — the one supported way to add capabilities to the relay from outside core.
+> A venue for in-progress [agent-relay](https://github.com/joniba/agent-relay) capabilities, built as
+> a normal drop-in plugin. Capabilities here are **not necessarily related to each other** — this is
+> a workbench, not a coherent product.
 
-This commit is the reusable template. Start a new plugin repo from it rather than copying an
-existing plugin and deleting the parts you don't want.
+Anything proven here is migrated into core (or into a dedicated plugin) **manually**; there is no
+automatic promotion path. Treat everything here as subject to change or removal. Internal working
+documents — requirements, design, plans — live in the private companion repo, not here.
+
+## Status
+
+Scaffolded from the plugin template. No capability has landed yet: the plugin registers a single
+pass-through interceptor, the smallest registration core will accept.
+
+## Known gaps
+
+Recorded deliberately rather than left to be discovered later. Both are accepted for now.
+
+**The local transport retains registry entries indefinitely.** The role capability planned for this
+plugin needs a session's registry entry to survive a graceful exit, so the entry is marked offline
+rather than deleted. agent-relay core's local SQLite transport has no retention sweep of any kind —
+unlike the Postgres plugin, which prunes messages after 24 hours and agents that have not
+heartbeated for 7 days. Soft-deleted entries on the local transport therefore accumulate with
+nothing to remove them. Harmless in practice for a single-user local store, but unbounded. A
+retention sweep for the local transport is deferred.
+
+**A returning session can briefly advertise a role another session already holds.** Role conflicts
+are resolved best-effort at session start: a session checks whether a role it still carries is
+already held by a live session and, if so, releases it and warns. That check necessarily runs
+*after* the session registers, so there is a short window in which both sessions advertise the same
+role and a lookup could resolve to the wrong one. This is deliberately best-effort — closing it
+entirely would require an atomic claim operation implemented by every transport, which is a cost the
+capability does not justify.
+
+## Relationship to the other repos
+
+| Repo | Role |
+|---|---|
+| [agent-relay](https://github.com/joniba/agent-relay) | Core — tools, seam contracts, plugin loader, local default transport |
+| [agent-relay-pg-plugin](https://github.com/joniba/agent-relay-pg-plugin) | Cross-machine Postgres transport, Entra credentials, machine labelling |
+| **this repo** | Experimental capabilities, composed alongside the above |
+
+This plugin is designed to **compose with** the pg plugin rather than replace it, which constrains
+what it may declare: `transport` is single-instance and last-loaded-wins, and plugins load
+alphabetically, so a transport declared here would be silently overridden by the pg plugin. Prefer
+`interceptors` — an `onSend` hook can rewrite a message, including its recipient, before whichever
+transport is installed receives it.
+
+## The plugin template
+
+The first commit of this repo — **"Add the reusable agent-relay plugin template"** — is a standalone,
+generic template. Start new plugin repos from that commit rather than copying an existing plugin and
+deleting the parts you don't want. It carries the factory skeleton, plugin-owned `.env` loading, a
+dependency-free test setup, the `files` install allowlist, and the contract notes below.
 
 ## What a plugin can and cannot do
 
@@ -48,9 +96,9 @@ package.json     name, agentRelay.entry, and the `files` install allowlist
 folder. They must be literal file/directory paths, not npm globs. `tests/` and this README are
 deliberately excluded from the install.
 
-## Starting a new plugin from this template
+## Starting a new plugin from the template commit
 
-1. Create the repo and copy in this template commit.
+1. Create the repo and copy in the template commit.
 2. Rename in `package.json`: `name`, `description`, `keywords`, and add `repository`.
 3. Rename the Registration's `name` in `index.mjs`.
 4. Replace the pass-through interceptor with the real capabilities.
@@ -71,15 +119,15 @@ exported in the shell wins.
 Plugins have no installer of their own — agent-relay core installs them from a GitHub repo:
 
 ```bash
-npx --yes github:joniba/agent-relay --add-plugin <owner>/<repo>
-npx --yes github:joniba/agent-relay --remove-plugin <package-name>
+npx --yes github:joniba/agent-relay --add-plugin joniba/agent-relay-experimental-plugin
+npx --yes github:joniba/agent-relay --remove-plugin agent-relay-experimental
 ```
 
 Core clones the repo, runs `npm install --omit=dev`, and copies the `files` allowlist into the
-extension's own `plugins/<package-name>/` folder, which survives core upgrades. A gitignored `.env`
-in that folder is preserved across plugin upgrades.
+extension's own `plugins/agent-relay-experimental/` folder, which survives core upgrades. A
+gitignored `.env` in that folder is preserved across plugin upgrades.
 
-Verify it loaded: each plugin logs `plugin loaded: <name>` to the rolling diagnostic log at
+Verify it loaded: look for `plugin loaded: agent-relay-experimental` in the rolling diagnostic log at
 `<data-dir>/logs/agent-relay.log` (on Windows, `%LOCALAPPDATA%\agent-relay`).
 
 ## Test

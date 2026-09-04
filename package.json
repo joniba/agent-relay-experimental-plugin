@@ -1,7 +1,7 @@
 {
-  "name": "agent-relay-plugin-template",
+  "name": "agent-relay-experimental",
   "version": "0.1.0",
-  "description": "Template for an agent-relay drop-in plugin.",
+  "description": "Experimental agent-relay plugin — a venue for in-progress plugin capabilities.",
   "type": "module",
   "main": "index.mjs",
   "files": [
@@ -13,6 +13,10 @@
   },
   "license": "MIT",
   "author": "joniba",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joniba/agent-relay-experimental-plugin.git"
+  },
   "engines": {
     "node": ">=22.5.0"
   },
@@ -23,6 +27,6 @@
     "copilot-cli",
     "agent-relay",
     "plugin",
-    "template"
+    "experimental"
   ]
 }

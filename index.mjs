@@ -72,10 +72,10 @@ export default function createPlugin(ctx) {
   void log;
 
   return {
-    name: "agent-relay-plugin-template",
-    // A pass-through interceptor: the smallest registration core accepts. Replace
-    // it with this plugin's real capabilities. A Registration declaring nothing
-    // usable is rejected at load time.
+    name: "agent-relay-experimental",
+    // A pass-through interceptor: the smallest registration core accepts, and the
+    // current state of this plugin until a capability lands here. A Registration
+    // declaring nothing usable is rejected at load time.
     interceptors: [
       {
         onSend(message, next) {
