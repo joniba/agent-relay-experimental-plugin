@@ -1,29 +1,29 @@
 # agent-relay-experimental-plugin
 
-> A venue for in-progress [agent-relay](https://github.com/joniba/agent-relay) capabilities, built as
-> a normal drop-in plugin. Capabilities here are **not necessarily related to each other** — this is
-> a workbench, not a coherent product.
+> A home for [agent-relay](https://github.com/joniba/agent-relay) capabilities whose **final home has
+> not been decided yet**, built as a normal drop-in plugin. Capabilities here are not necessarily
+> related to each other.
 
-Anything proven here is migrated into core (or into a dedicated plugin) **manually**; there is no
-automatic promotion path. Treat everything here as subject to change or removal. Internal working
-documents — requirements, design, plans — live in the private companion repo, not here.
+"Experimental" refers to the *placement*, not the quality bar. A capability may be fully specified,
+reviewed and relied upon while still living here because it has not been given a permanent repo.
+Anything that graduates moves out — manually, with no automatic promotion path.
 
-## Status
-
-Scaffolded from the plugin template. No capability has landed yet: the plugin registers a single
-pass-through interceptor, the smallest registration core will accept.
+Internal working documents — requirements, design, plans — live in the private companion repo, not
+here.
 
 ## Known gaps
 
 Recorded deliberately rather than left to be discovered later. Both are accepted for now.
 
-**The local transport retains registry entries indefinitely.** The role capability planned for this
-plugin needs a session's registry entry to survive a graceful exit, so the entry is marked offline
-rather than deleted. agent-relay core's local SQLite transport has no retention sweep of any kind —
-unlike the Postgres plugin, which prunes messages after 24 hours and agents that have not
-heartbeated for 7 days. Soft-deleted entries on the local transport therefore accumulate with
-nothing to remove them. Harmless in practice for a single-user local store, but unbounded. A
-retention sweep for the local transport is deferred.
+**Roles do not survive quitting on the local transport.** A role is stored as an attribute on the
+session's registry entry. The Postgres transport marks a departing session offline, so the entry and
+its roles survive and a resumed session still holds them. The local SQLite transport **deletes** the
+entry on a graceful exit, so the roles go with it and a resumed session starts with none. Roles work
+on a local-only mesh while sessions are live; they just do not persist across quitting. Making the
+local transport soft-delete instead was considered and rejected — it would have leaked into presence
+semantics well beyond roles, since the alias-collision check and recipient resolution both filter on
+heartbeat with no liveness predicate, so a soft-deleted entry would keep reserving its alias and keep
+accepting messages after the session ended.
 
 **A returning session can briefly advertise a role another session already holds.** Role conflicts
 are resolved best-effort at session start: a session checks whether a role it still carries is
