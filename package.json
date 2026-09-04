@@ -1,0 +1,28 @@
+{
+  "name": "agent-relay-plugin-template",
+  "version": "0.1.0",
+  "description": "Template for an agent-relay drop-in plugin.",
+  "type": "module",
+  "main": "index.mjs",
+  "files": [
+    "index.mjs",
+    "env-file.mjs"
+  ],
+  "agentRelay": {
+    "entry": "index.mjs"
+  },
+  "license": "MIT",
+  "author": "joniba",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "copilot-cli",
+    "agent-relay",
+    "plugin",
+    "template"
+  ]
+}
