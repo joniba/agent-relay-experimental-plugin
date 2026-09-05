@@ -53,9 +53,26 @@ function rolesOf(agent) {
     .map((k) => k.slice(ROLE_PREFIX.length));
 }
 
-/** The live holder of a role, or null. */
-function holderOf(agents, role) {
-  return agents.find((a) => rolesOf(a).includes(role)) ?? null;
+/** When an agent claimed a role — the attribute's value — or "" if it does not hold it. */
+function claimedAt(agent, role) {
+  return String(((agent && agent.attributes) || {})[ROLE_PREFIX + role] ?? "");
+}
+
+/**
+ * Every live session publishing a role, newest claim first.
+ *
+ * Plural on purpose. Nothing enforces one-holder-per-role at write time — two sessions
+ * can each assign the role to themselves, and neither write touches the other's entry,
+ * so neither is refused. Reading only the first match would silently route to an
+ * arbitrary one of them; reading them all lets an assignment clean the duplicates up.
+ *
+ * The attribute value is the assignment time, so the newest claim sorts first and
+ * resolution is at least deterministic and defensible while duplicates exist.
+ */
+function holdersOf(agents, role) {
+  return agents
+    .filter((a) => rolesOf(a).includes(role))
+    .sort((x, y) => claimedAt(y, role).localeCompare(claimedAt(x, role)));
 }
 
 /** Resolve a caller-supplied target — a name or a session id — against the roster. */
@@ -86,7 +103,16 @@ export default function createRolesPlugin() {
   function notReady() {
     if (unavailable) return failure(unavailable);
     if (!relay || !self) {
-      return failure("The roles plugin has not finished starting up — try again in a moment.");
+      // Deliberately names the permanent possibility rather than asserting the
+      // transient one. A core with plugin *tools* but no activation hook never calls
+      // `activate`, so this state never resolves — and telling that caller to retry
+      // would be advice that can only ever fail.
+      return failure(
+        "The roles plugin has not activated. Either agent-relay is still starting up — " +
+          "in which case try again in a moment — or this core does not support plugin " +
+          "activation, which the roles plugin requires. If retrying does not help, " +
+          "update agent-relay.",
+      );
     }
     return null;
   }
@@ -116,9 +142,10 @@ export default function createRolesPlugin() {
 
     briefing:
       "Sessions can hold named roles — a stable handle for whoever is currently doing a job, " +
-      "which survives the alias changes that happen every restart. Prefer send_to_role over " +
-      "send_message when you mean 'whoever currently holds this job' rather than one specific " +
-      "session; list_relay_agents shows who holds what. Use assign_role to designate a session.",
+      "rather than for one specific session. Prefer send_to_role over send_message when you " +
+      "mean 'whoever currently holds this job'; list_relay_agents shows who holds what. A role " +
+      "is held by a live session, so if nobody holds the one you need, use assign_role to " +
+      "designate one — including after a restart.",
 
     /**
      * The conflict repair, run once at startup.
@@ -149,15 +176,35 @@ export default function createRolesPlugin() {
       if (!mine) return;
 
       for (const role of rolesOf(mine)) {
-        const holder = agents.find((a) => a.id !== self.id && rolesOf(a).includes(role));
+        // Yield only to a *newer* claim. The check is otherwise symmetric, and two
+        // sessions returning together would then each see the other holding the role
+        // and each release it, leaving it held by nobody. Comparing claim times gives
+        // both sides the same answer, and it is the same rule the rest of the plugin
+        // uses: the most recent assignment was the most recent decision.
+        const mineAt = claimedAt(mine, role);
+        const holder = agents.find((a) => a.id !== self.id && claimedAt(a, role) > mineAt);
         if (!holder) continue;
         // Addressed explicitly rather than relying on the seam's default, so the
         // write is unambiguous at the call site.
-        await relay.setAttributes({ id: self.id, attributes: { [ROLE_PREFIX + role]: null } });
-        ctx.log?.(
-          `roles: released "${role}" — ${holder.name} holds it now`,
-          { level: "warning" },
-        );
+        const res = await relay.setAttributes({
+          id: self.id,
+          attributes: { [ROLE_PREFIX + role]: null },
+        });
+        // Reporting a release that did not happen would be worse than not reporting
+        // one: it leaves two sessions advertising the role with the only diagnostic
+        // saying otherwise. `setAttributes` reports a transport that cannot store
+        // attributes by returning, not by throwing, so the result has to be read.
+        if (res && res.ok) {
+          ctx.log?.(`roles: released "${role}" — ${holder.name} holds it now`, {
+            level: "warning",
+          });
+        } else {
+          ctx.log?.(
+            `roles: still advertising "${role}", which ${holder.name} also holds — ` +
+              `could not release it: ${(res && res.error) || "unknown error"}`,
+            { level: "warning" },
+          );
+        }
       }
     },
 
@@ -192,23 +239,55 @@ export default function createRolesPlugin() {
           const target = resolveTarget(agents, to, self);
           if (target.error) return failure(target.error);
 
-          const holder = holderOf(agents, role);
-          if (holder && holder.id === target.agent.id) {
+          const holders = holdersOf(agents, role);
+          if (holders.length === 1 && holders[0].id === target.agent.id) {
             return success(`"${target.agent.name}" already holds "${role}".`);
           }
 
-          // Displacing is a separate write to somebody else's entry, judged on its own.
-          if (holder) {
+          // Decide permission for the WHOLE operation before mutating anything.
+          //
+          // The transport judges each write on its own, so leaving the gate to it lets
+          // a hand-off half-happen: when this session is the incumbent, stripping the
+          // role from itself is allowed without force, and only the write to the new
+          // holder is refused. The caller is told "refused" while the role has in fact
+          // been taken from its holder and given to nobody.
+          const strangers = holders
+            .filter((h) => h.id !== self.id && h.id !== target.agent.id)
+            .map((h) => h.name);
+          if (target.agent.id !== self.id) strangers.push(target.agent.name);
+          if (strangers.length && !force) {
+            return failure(
+              `Assigning "${role}" this way writes ${strangers.map((n) => `"${n}"`).join(" and ")}, ` +
+                `not just this session. Pass force: true if that is intended.`,
+            );
+          }
+
+          // Release before assigning, so a transport failure part-way leaves the role
+          // unheld rather than doubly held. An unheld role fails loudly on the next
+          // send_to_role; a doubly held one silently routes to one of them.
+          const released = [];
+          for (const holder of holders) {
+            if (holder.id === target.agent.id) continue;
             const failed = await write(holder.id, role, null, force);
             if (failed) return failed;
+            released.push(holder.name);
           }
-          const failed = await write(target.agent.id, role, new Date().toISOString(), force);
-          if (failed) return failed;
 
+          const failed = await write(target.agent.id, role, new Date().toISOString(), force);
+          if (failed) {
+            return released.length
+              ? failure(
+                  `${failed.textResultForLlm} "${role}" was already taken from ` +
+                    `${released.map((n) => `"${n}"`).join(" and ")}, so nobody holds it now — ` +
+                    `assign it again.`,
+                )
+              : failed;
+          }
+
+          if (!released.length) return success(`"${target.agent.name}" now holds "${role}".`);
           return success(
-            holder
-              ? `"${role}" moved from "${holder.name}" to "${target.agent.name}".`
-              : `"${target.agent.name}" now holds "${role}".`,
+            `"${role}" moved from ${released.map((n) => `"${n}"`).join(" and ")} to ` +
+              `"${target.agent.name}".`,
           );
         },
       },
@@ -267,26 +346,36 @@ export default function createRolesPlugin() {
           if (error) return failure(error);
           if (!content) return failure("'content' is required");
 
-          const holder = holderOf(await relay.listAgents(), role);
+          const holders = holdersOf(await relay.listAgents(), role);
           // An unheld role is an actionable failure, never a silent drop — the caller
           // asked for a job to be done and nobody is currently doing it.
-          if (!holder) {
+          if (!holders.length) {
             return failure(
               `No live session holds "${role}". Use list_relay_agents to see who holds what, ` +
                 `or assign_role to designate one.`,
             );
           }
+          const holder = holders[0];
 
           // Through the relay API, never the transport — that is what runs the
           // interceptor chain, so a role-addressed message is treated exactly like
           // any other.
           const res = await relay.sendMessage({ to: holder.id, content });
-          return res && res.ok
-            ? success(
-                `Message sent to "${holder.name}", who holds "${role}" (id: ${res.id}). ` +
-                  `Any reply arrives automatically as a new turn — do not poll.`,
-              )
-            : failure(`Could not send to "${role}": ${(res && res.error) || "unknown error"}`);
+          if (!res || !res.ok) {
+            return failure(`Could not send to "${role}": ${(res && res.error) || "unknown error"}`);
+          }
+          // Disclose a split rather than picking silently: two holders means an
+          // assignment raced, and the caller should know their message went to one of
+          // them rather than to "the" holder.
+          const contested =
+            holders.length > 1
+              ? ` ${holders.length} sessions currently hold "${role}"; this went to the most ` +
+                `recently assigned. Use assign_role to settle it.`
+              : "";
+          return success(
+            `Message sent to "${holder.name}", who holds "${role}" (id: ${res.id}). ` +
+              `Any reply arrives automatically as a new turn — do not poll.${contested}`,
+          );
         },
       },
     ],

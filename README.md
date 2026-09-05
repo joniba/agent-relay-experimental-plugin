@@ -14,7 +14,8 @@ here.
 ## Session roles
 
 A **role** is a durable label naming which session currently answers to something like `code-owner`,
-so callers stop having to know an alias that changes every restart.
+so callers stop needing the session alias, which changes every restart. A role outlives the alias —
+it does not outlive the session. See [Known gaps](#known-gaps) before relying on it across restarts.
 
 ```
 assign_role(role, to?, force?)     designate a session
@@ -26,31 +27,50 @@ Roles also appear in `list_relay_agents`, so "who holds what" is answerable with
 
 ### How it works
 
-A role is a fact a session publishes about **itself** on its own registry entry — one attribute per
-role, keyed `role.<name>`, valued with the moment it was assigned. Nothing else stores anything, which
-is what lets it work over any transport without knowing which one is installed: the registry is
-already replicated by whatever is carrying the messages.
+A role is an attribute on a session's registry entry — one key per role, `role.<name>`, valued with
+the moment it was assigned. Nothing else stores anything, which is what lets it work over any
+transport without knowing which one is installed: the registry is already replicated by whatever is
+carrying the messages.
 
-Everything follows from one rule: **a role is held by a live session.** Resolving one means scanning
-live entries. A session that ends stops being live, so it stops holding its roles. One that dies
-without warning goes stale, which amounts to the same thing. A resumed session keeps its roles
-because it keeps its registry entry.
+Two consequences are worth stating separately, because only the first follows from the storage model:
+
+**A role is held by a live session.** Resolving one scans live entries, so a session that is not
+running holds nothing. This is the rule the tools are built on.
+
+**Everything else about a role is best-effort.** Assignment is a read of the roster followed by
+independent per-entry writes, with no atomic claim anywhere — no transport offers one. Uniqueness is
+therefore a convention the tools maintain, not an invariant the system enforces, and the gaps below
+are consequences of *that*, not of liveness.
 
 ### Assigning
 
-`assign_role` defaults to this session and needs nothing special. Two cases need `force`:
+`assign_role` defaults to this session and needs nothing special. `force` is required whenever the
+operation writes an entry other than this session's — targeting someone else, or displacing a live
+holder, which applies even when assigning to *yourself*.
 
-- targeting **another** session, and
-- **displacing a live holder** — even when assigning to *yourself*, because taking the role off the
-  previous holder is a write to *their* entry.
+The permission is decided for the whole operation before anything is written, so a refused assignment
+changes nothing. A transport failure part-way is still possible; when it happens the role is left
+unheld rather than doubly held, and the error says so, because an unheld role fails loudly on the next
+`send_to_role` while a doubly held one would quietly route to one of them.
 
-That gate is a convention, not a wall. It exists so the call that changes a running session's state
+`force` is a convention, not a wall. It exists so the call that changes a running session's state
 without telling it looks different at the call site from the one that doesn't.
 
 ### Requires
 
-An agent-relay core with plugin **tools**, **activation** and **registry attributes**. Against an
-older core the plugin fails to activate with a message saying exactly that, rather than misbehaving.
+- **Node >= 22.5.0**, per `package.json`.
+- **An agent-relay core with plugin tools, activation and registry attributes.** All three are recent;
+  a core older than any of them cannot run this plugin.
+- **A transport that stores attributes.** Attribute support is optional per transport, so a current
+  core can still refuse the writes. The local SQLite transport and the Postgres plugin both support
+  it; a third-party transport may not.
+
+**Installing this plugin does not upgrade core** — `--add-plugin` deliberately leaves an existing
+installation alone. Upgrade core first, then add the plugin, then start a **new** Copilot session;
+extensions are loaded at session start, so an already-running session will not pick it up.
+
+Against a core that has plugin tools but no activation hook, the tools load but never activate. They
+say so — naming that possibility rather than telling you to retry something that cannot succeed.
 
 ## Known gaps
 
@@ -63,24 +83,30 @@ designate it again, which is one tool call. Whether the entry survives at all is
 transport: the Postgres transport marks a departing session offline and keeps the entry, so roles come
 back on resume, while the local SQLite transport **deletes** the entry on a graceful exit and the
 roles go with it. Roles work on a local-only mesh while sessions are live; they just do not persist
-across quitting. Making the local transport soft-delete instead was considered and rejected — it would
-have leaked into presence semantics well beyond roles, since the alias-collision check and recipient
-resolution both filter on heartbeat with no liveness predicate, so a soft-deleted entry would keep
-reserving its alias and keep accepting messages after the session ended.
+across quitting. Retaining the entry instead was considered and rejected, because an entry that
+outlives its session is a presence question rather than a roles one — the reasoning is in the design
+docs.
 
-**A returning session can briefly advertise a role another session already holds.** Role conflicts
-are resolved best-effort at session start: a session checks whether a role it still carries is
-already held by a live session and, if so, releases it and warns. That check necessarily runs
-*after* the session registers, so there is a short window in which both sessions advertise the same
-role and a lookup could resolve to the wrong one. This is deliberately best-effort — closing it
-entirely would require an atomic claim operation implemented by every transport, which is a cost the
-capability does not justify.
+**Two sessions can end up holding the same role.** Assignment reads the roster and then writes
+entries independently; there is no atomic claim, because no transport offers one. Two sessions
+assigning themselves the same role concurrently will both succeed, and a returning session briefly
+advertises a role it held before the startup check has run. Uniqueness is therefore **convergent**
+rather than enforced:
+
+- `assign_role` displaces *every* live holder, so any assignment settles the role.
+- At startup a session releases a role that a live session has claimed **more recently** than it did,
+  and warns. Comparing claim times rather than mere presence is what stops two returning sessions from
+  each yielding and leaving the role held by nobody.
+- While a role is contested, `send_to_role` delivers to the most recent claim and says the role is
+  contested rather than picking silently.
 
 **One holder per role, mesh-wide.** There is no way to scope a role to a machine, so two machines
 cannot each have a `coordinator` — distinct names (`coordinator-desktop`, `coordinator-laptop`) are
-the stopgap. Per-machine scoping needs the system to know which sessions share a machine, and nothing
-currently can: core is deliberately machine-agnostic, `machine` is a convention of the Postgres
-plugin, and the local transport reports nothing.
+the stopgap. The information is not really the obstacle: the Postgres transport does publish a
+`machine` for each session. But `machine` is that transport's convention, not something core knows,
+and scoping on it would make a transport-agnostic capability depend on one transport being installed —
+which is the coupling this design exists to avoid. Machine scoping needs a transport-neutral notion of
+locality first.
 
 ## Relationship to the other repos
 
@@ -130,18 +156,20 @@ Things that surprise people:
   before the session has an identity; declared tools only run when a consumer calls them. `activate`
   receives the resolved identity and a live relay handle. A throw is contained: it disables that
   plugin's tools with a durable error rather than killing the session.
-- **Two plugins that both declare a `transport` will fight**, and plugins load alphabetically, so the
-  later name wins. If the goal is to shape messages rather than to own delivery, use an interceptor —
-  `onSend` can rewrite a message (including its recipient) before whatever transport is installed
-  receives it.
+- **Two plugins that both declare a `transport` will fight**, so only one survives. Installed plugins
+  load alphabetically by folder; anything listed in `AGENT_RELAY_PLUGINS` loads first, in the order
+  listed. If the goal is to shape messages rather than to own delivery, use an interceptor — `onSend`
+  can rewrite a message (including its recipient) before whatever transport is installed receives it.
 - **Loading is fail-loud and all-or-nothing.** Any import error, a missing factory, an invalid
   registration, or a registration declaring no usable capability aborts startup with an error naming
   the plugin, and the session runs with the relay **inactive**. There is no partial load.
 - **To reject a message, drop it — don't throw.** Return from `onSend` / `onReceive` without calling
   `next`. A throw is treated as poison: it is logged and consumed, never redelivered.
-- **`renderPrompt` is first-non-null-wins**, so only one plugin's ever runs. See
-  [agent-relay#5](https://github.com/joniba/agent-relay/issues/5) — this plugin deliberately declares
-  none rather than silently suppressing the pg plugin's machine label.
+- **`renderPrompt` is first-non-null-wins.** Every renderer runs until one answers, and only that
+  one result is used. See [agent-relay#5](https://github.com/joniba/agent-relay/issues/5) — this
+  plugin deliberately declares none rather than silently suppressing the pg plugin's machine label.
+- **A plugin is named by core**, from its installed folder or entry filename. A `name` on the
+  Registration is never read.
 - **Never import agent-relay core.** Core is not a dependency. Duplicate the handful of helpers you
   need (see `stripControl` in `index.mjs`).
 
@@ -163,9 +191,12 @@ deliberately excluded from the install.
 
 1. Create the repo and copy in the template commit.
 2. Rename in `package.json`: `name`, `description`, `keywords`, and add `repository`.
-3. Rename the Registration's `name` in `index.mjs`.
-4. Replace the pass-through interceptor with the real capabilities.
-5. Extend `files` with any new directories the plugin needs at runtime.
+3. Replace the pass-through interceptor with the real capabilities.
+4. Extend `files` with any new directories the plugin needs at runtime.
+
+> The template commit is frozen, so its contract notes describe core as it was when the commit was
+> made — it predates plugin `tools`, `briefing` and `activate`, for instance. Take the skeleton from
+> it and the contract from the section above, which tracks the core this repo is built against.
 
 ## Configuration
 

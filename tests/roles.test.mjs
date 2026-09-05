@@ -119,7 +119,7 @@ test("displacing a live holder needs force EVEN when assigning to yourself", asy
 
   const refused = await tool("assign_role").handler({ role: "code-owner" });
   assert.equal(refused.resultType, "failure");
-  assert.match(refused.textResultForLlm, /without force/);
+  assert.match(refused.textResultForLlm, /Pass force: true/);
   // And nothing moved.
   assert.ok("role.code-owner" in relay.agents[1].attributes);
   assert.ok(!("role.code-owner" in relay.agents[0].attributes));
@@ -129,6 +129,52 @@ test("displacing a live holder needs force EVEN when assigning to yourself", asy
   assert.match(forced.textResultForLlm, /moved from "gull" to "loon"/);
   assert.ok(!("role.code-owner" in relay.agents[1].attributes), "previous holder must stop holding it");
   assert.ok("role.code-owner" in relay.agents[0].attributes);
+});
+
+test("a refused hand-off writes NOTHING — it must not strip the incumbent first", async () => {
+  // The transport judges each write on its own, and releasing your OWN role is a
+  // self-write it allows. Leaving the gate to it therefore let a refused hand-off
+  // take the role off its holder and give it to nobody, while reporting a refusal.
+  const agents = [agent("s-me", "loon", { "code-owner": "2026-01-01" }), agent("s-them", "gull")];
+  const { tool, relay } = await up(agents);
+
+  const refused = await tool("assign_role").handler({ role: "code-owner", to: "gull" });
+  assert.equal(refused.resultType, "failure");
+  assert.equal(relay.writes.length, 0, "a refusal must be decided before any write");
+  assert.ok("role.code-owner" in relay.agents[0].attributes, "the incumbent must keep the role");
+});
+
+test("a hand-off that fails part-way says the role is now unheld", async () => {
+  const agents = [agent("s-me", "loon", { "code-owner": "2026-01-01" }), agent("s-them", "gull")];
+  const { tool, relay } = await up(agents);
+  // Release succeeds, then the assign fails — the target died in the window, say.
+  let calls = 0;
+  const real = relay.setAttributes;
+  relay.setAttributes = async (args) =>
+    ++calls === 2 ? { ok: false, error: "transport unavailable" } : real(args);
+
+  const res = await tool("assign_role").handler({ role: "code-owner", to: "gull", force: true });
+  assert.equal(res.resultType, "failure");
+  assert.match(res.textResultForLlm, /nobody holds it now/);
+  assert.match(res.textResultForLlm, /assign it again/);
+});
+
+test("assign_role displaces EVERY holder, not just the first", async () => {
+  // Two sessions can each assign a role to themselves without either being refused,
+  // so duplicates are reachable and an assignment has to converge them.
+  const agents = [
+    agent("s-me", "loon"),
+    agent("s-a", "gull", { "code-owner": "2026-01-01" }),
+    agent("s-b", "tern", { "code-owner": "2026-02-02" }),
+  ];
+  const { tool, relay } = await up(agents);
+
+  const res = await tool("assign_role").handler({ role: "code-owner", force: true });
+  assert.equal(res.resultType, "success");
+  assert.ok(!("role.code-owner" in relay.agents[1].attributes));
+  assert.ok(!("role.code-owner" in relay.agents[2].attributes));
+  assert.ok("role.code-owner" in relay.agents[0].attributes);
+  assert.match(res.textResultForLlm, /moved from "tern" and "gull" to "loon"/);
 });
 
 test("assigning to another session by name needs force", async () => {
@@ -204,6 +250,20 @@ test("send_to_role delivers to the current holder through the relay API", async 
   assert.match(res.textResultForLlm, /"gull", who holds "code-owner"/);
 });
 
+test("send_to_role picks the newest claim and says the role is contested", async () => {
+  const agents = [
+    agent("s-me", "loon"),
+    agent("s-a", "gull", { "code-owner": "2026-01-01" }),
+    agent("s-b", "tern", { "code-owner": "2026-02-02" }),
+  ];
+  const { tool, relay } = await up(agents);
+
+  const res = await tool("send_to_role").handler({ role: "code-owner", content: "ping" });
+  assert.equal(res.resultType, "success");
+  assert.equal(relay.sent[0].to, "s-b", "the most recent assignment wins");
+  assert.match(res.textResultForLlm, /2 sessions currently hold/);
+});
+
 test("send_to_role refuses when nobody live holds the role", async () => {
   const { tool, relay } = await up([agent("s-me", "loon")]);
   const res = await tool("send_to_role").handler({ role: "code-owner", content: "hi" });
@@ -245,6 +305,44 @@ test("a returning session KEEPS a role nobody else took", async () => {
   assert.equal(warnings.length, 0);
 });
 
+test("only the OLDER claim yields — two returning sessions must not both release", async () => {
+  // The check is otherwise symmetric, so each would see the other holding the role
+  // and each would release it, leaving the role held by nobody.
+  const older = [
+    agent("s-me", "loon", { "code-owner": "2026-01-01" }),
+    agent("s-them", "gull", { "code-owner": "2026-02-02" }),
+  ];
+  const a = await up(older);
+  assert.ok(!("role.code-owner" in a.relay.agents[0].attributes), "the older claim yields");
+
+  const newer = [
+    agent("s-me", "loon", { "code-owner": "2026-03-03" }),
+    agent("s-them", "gull", { "code-owner": "2026-02-02" }),
+  ];
+  const b = await up(newer);
+  assert.ok("role.code-owner" in b.relay.agents[0].attributes, "the newer claim keeps it");
+  assert.equal(b.warnings.length, 0);
+});
+
+test("activation does not claim a release it could not perform", async () => {
+  const agents = [
+    agent("s-me", "loon", { "code-owner": "2026-01-01" }),
+    agent("s-them", "gull", { "code-owner": "2026-02-02" }),
+  ];
+  const warnings = [];
+  const plugin = createPlugin({ env: {}, log: (msg, o) => warnings.push({ msg, ...o }) });
+  const relay = fakeRelay(agents);
+  relay.selfId = "s-me";
+  // A transport with no attribute support reports it by returning, not by throwing.
+  relay.setAttributes = async () => ({ ok: false, error: "not supported by the active transport" });
+
+  await plugin.activate({ relay, self: { id: "s-me", name: "loon" } });
+
+  assert.match(warnings[0].msg, /still advertising "code-owner"/);
+  assert.match(warnings[0].msg, /not supported by the active transport/);
+  assert.equal(warnings[0].level, "warning");
+});
+
 test("the conflict check only touches the contested role", async () => {
   const agents = [
     agent("s-me", "loon", { "code-owner": "2026-01-01", reviewer: "2026-01-01" }),
@@ -273,9 +371,12 @@ test("an older core without setAttributes fails activation with an actionable me
   assert.match(res.textResultForLlm, /newer agent-relay core/);
 });
 
-test("tools called before activation report a transient state, not a crash", async () => {
+test("tools called before activation name the permanent possibility, not just a retry", async () => {
+  // A core with plugin tools but no activation hook never calls activate, so this
+  // state never resolves — advising a retry alone would be advice that cannot work.
   const plugin = createPlugin({ env: {} });
   const res = await plugin.tools.find((t) => t.name === "send_to_role").handler({ role: "x", content: "y" });
   assert.equal(res.resultType, "failure");
-  assert.match(res.textResultForLlm, /has not finished starting up/);
+  assert.match(res.textResultForLlm, /has not activated/);
+  assert.match(res.textResultForLlm, /does not support plugin activation/);
 });
