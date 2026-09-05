@@ -65,6 +65,11 @@ without telling it looks different at the call site from the one that doesn't.
   core can still refuse the writes. The local SQLite transport and the Postgres plugin both support
   it; a third-party transport may not.
 
+Activation is bounded by core at 15 seconds, and a timed-out activation is abandoned rather than
+cancelled. The startup conflict check writes, so on a slow cross-machine mesh it can be declared
+failed and still release the contested role a moment later. The release is the correct repair either
+way; the only casualty is that the session was told activation failed when it partly succeeded.
+
 **Installing this plugin does not upgrade core** — `--add-plugin` deliberately leaves an existing
 installation alone. Upgrade core first, then add the plugin, then start a **new** Copilot session;
 extensions are loaded at session start, so an already-running session will not pick it up.
@@ -96,9 +101,17 @@ rather than enforced:
 - `assign_role` displaces *every* live holder, so any assignment settles the role.
 - At startup a session releases a role that a live session has claimed **more recently** than it did,
   and warns. Comparing claim times rather than mere presence is what stops two returning sessions from
-  each yielding and leaving the role held by nobody.
+  each yielding and leaving the role held by nobody. Two claims sharing an identical timestamp — two
+  sessions assigning in the same millisecond — leave neither strictly newer, so neither yields and the
+  duplicate persists until the next assignment. That is the safe direction, but it does mean the
+  tie-break is by claim time rather than a total order.
 - While a role is contested, `send_to_role` delivers to the most recent claim and says the role is
   contested rather than picking silently.
+
+**Contestation surfaces when you send, not when you list.** `list_relay_agents` renders roles
+generically — core groups `role.*` keys without knowing what they mean, so it cannot flag that two
+sessions sharing one is a problem, and this plugin does not render the roster. A contested role
+therefore looks like two ordinary rows. `send_to_role` is the surface that tells you.
 
 **One holder per role, mesh-wide.** There is no way to scope a role to a machine, so two machines
 cannot each have a `coordinator` — distinct names (`coordinator-desktop`, `coordinator-laptop`) are
