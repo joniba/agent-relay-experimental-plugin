@@ -14,8 +14,9 @@ here.
 ## Session roles
 
 A **role** is a durable label naming which session currently answers to something like `code-owner`,
-so callers stop needing the session alias, which changes every restart. A role outlives the alias —
-it does not outlive the session. See [Known gaps](#known-gaps) before relying on it across restarts.
+so callers can address *the job* rather than a particular session — no need to know which alias is
+doing it today, or that the alias changes every restart. The role outlives the alias; it does not
+outlive the session. See [Known gaps](#known-gaps) before relying on it across restarts.
 
 ```
 assign_role(role, to?, force?)     designate a session
@@ -34,8 +35,13 @@ carrying the messages.
 
 Two consequences are worth stating separately, because only the first follows from the storage model:
 
-**A role is held by a live session.** Resolving one scans live entries, so a session that is not
+**A role is held by a live session.** Resolving one scans the live roster, so a session that is not
 running holds nothing. This is the rule the tools are built on.
+
+"Live" means *recently heartbeating*, which lags reality by up to the staleness window. A session that
+has stopped is still listed until it ages out, so for a short period a role can still resolve to it.
+The message is delivered durably and waits — which is why `send_to_role` reports that it was sent
+rather than that it was answered.
 
 **Everything else about a role is best-effort.** Assignment is a read of the roster followed by
 independent per-entry writes, with no atomic claim anywhere — no transport offers one. Uniqueness is
@@ -43,6 +49,17 @@ therefore a convention the tools maintain, not an invariant the system enforces,
 are consequences of *that*, not of liveness.
 
 ### Assigning
+
+```
+assign_role({ role: "code-owner" })                        # this session takes it
+assign_role({ role: "code-owner", to: "bob" })             # → refused, see below
+assign_role({ role: "code-owner", to: "bob", force: true }) # hand it to bob
+release_role({ role: "code-owner" })                       # give it up
+send_to_role({ role: "code-owner", content: "please review #12" })
+```
+
+`to` and `from` take either the alias shown by `list_relay_agents` or a session id. An alias matching
+more than one live session is refused rather than guessed.
 
 `assign_role` defaults to this session and needs nothing special. `force` is required whenever the
 operation writes an entry other than this session's — targeting someone else, or displacing a live
@@ -69,6 +86,19 @@ Activation is bounded by core at 15 seconds, and a timed-out activation is aband
 cancelled. The startup conflict check writes, so on a slow cross-machine mesh it can be declared
 failed and still release the contested role a moment later. The release is the correct repair either
 way; the only casualty is that the session was told activation failed when it partly succeeded.
+
+**Check you have all three.** Start a session and look in the diagnostic log
+(`<data-dir>/logs/agent-relay.log`) for both lines:
+
+```
+plugin loaded: agent-relay-experimental      ← tools capability present
+plugin activated: agent-relay-experimental   ← activation capability present
+```
+
+If the first is missing, the core is too old for plugin tools. If the first appears without the
+second, the core has tools but no activation hook, and the tools will say so when called. Attribute
+support is the third, and it is a property of the *transport* rather than the core — a missing one
+shows up as `assign_role` failing with "not supported by the active transport".
 
 **Installing this plugin does not upgrade core** — `--add-plugin` deliberately leaves an existing
 installation alone. Upgrade core first, then add the plugin, then start a **new** Copilot session;
@@ -100,13 +130,17 @@ rather than enforced:
 
 - `assign_role` displaces *every* live holder, so any assignment settles the role.
 - At startup a session releases a role that a live session has claimed **more recently** than it did,
-  and warns. Comparing claim times rather than mere presence is what stops two returning sessions from
-  each yielding and leaving the role held by nobody. Two claims sharing an identical timestamp — two
-  sessions assigning in the same millisecond — leave neither strictly newer, so neither yields and the
-  duplicate persists until the next assignment. That is the safe direction, but it does mean the
-  tie-break is by claim time rather than a total order.
+  and warns — in the diagnostic log (`<data-dir>/logs/agent-relay.log`; on Windows
+  `%LOCALAPPDATA%\agent-relay`), not in the session. Nothing tells you in-session that a role was
+  dropped, so if you are relying on one after a restart, check that you still hold it. Comparing claim
+  times rather than mere presence is what stops two returning sessions from each yielding and leaving
+  the role held by nobody. Two claims sharing an identical timestamp — two sessions assigning in the
+  same millisecond — leave neither strictly newer, so neither yields and the duplicate persists until
+  the next assignment. That is the safe direction, but it does mean the tie-break is by claim time
+  rather than a total order.
 - While a role is contested, `send_to_role` delivers to the most recent claim and says the role is
-  contested rather than picking silently.
+  contested rather than picking silently — including when the most recent claim is **you**, in which
+  case it refuses and says how many others also hold it.
 
 **Contestation surfaces when you send, not when you list.** `list_relay_agents` renders roles
 generically — core groups `role.*` keys without knowing what they mean, so it cannot flag that two

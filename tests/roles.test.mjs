@@ -223,7 +223,10 @@ test("releasing someone else's role needs force", async () => {
 
   const refused = await tool("release_role").handler({ role: "code-owner", from: "gull" });
   assert.equal(refused.resultType, "failure");
-  assert.match(refused.textResultForLlm, /without force/);
+  // Refused by the plugin, naming the session the way the caller addressed it — not by
+  // the transport, which would name a raw session id and prescribe nothing.
+  assert.match(refused.textResultForLlm, /from "gull"/);
+  assert.match(refused.textResultForLlm, /Pass force: true/);
 
   const forced = await tool("release_role").handler({ role: "code-owner", from: "gull", force: true });
   assert.equal(forced.resultType, "success");
@@ -379,4 +382,32 @@ test("tools called before activation name the permanent possibility, not just a 
   assert.equal(res.resultType, "failure");
   assert.match(res.textResultForLlm, /has not activated/);
   assert.match(res.textResultForLlm, /does not support plugin activation/);
+});
+
+test("send_to_role tells the holder they hold it, instead of core's self-send error", async () => {
+  // Core refuses a self-send with a message about self-sending, which would swallow
+  // the contested warning for the caller who most needs it: the most-recent holder,
+  // who believes they are the only one.
+  const agents = [
+    agent("s-me", "loon", { "code-owner": "2026-03-03" }),
+    agent("s-them", "gull", { "code-owner": "2026-01-01" }),
+  ];
+  const { tool, relay } = await up(agents);
+
+  const res = await tool("send_to_role").handler({ role: "code-owner", content: "ping" });
+  assert.equal(res.resultType, "failure");
+  assert.match(res.textResultForLlm, /You hold "code-owner" yourself/);
+  assert.match(res.textResultForLlm, /1 other session/, "the contested state must still surface");
+  assert.equal(relay.sent.length, 0, "nothing should be sent");
+});
+
+test("send_to_role does not promise a reply it cannot guarantee", async () => {
+  // The roster is heartbeat-based, so a holder may be a session that has stopped and
+  // not yet aged out. Delivery is durable; arrival is not.
+  const agents = [agent("s-me", "loon"), agent("s-them", "gull", { "code-owner": "2026-01-01" })];
+  const { tool } = await up(agents);
+
+  const res = await tool("send_to_role").handler({ role: "code-owner", content: "ping" });
+  assert.equal(res.resultType, "success");
+  assert.match(res.textResultForLlm, /if one comes/);
 });

@@ -219,7 +219,13 @@ export default function createRolesPlugin() {
           type: "object",
           properties: {
             role: { type: "string", description: "Role name, e.g. code-owner" },
-            to: { type: "string", description: "Target session name or id (default: this session)" },
+            to: {
+              type: "string",
+              description:
+                "Target session: either the alias shown by list_relay_agents, or a session id. " +
+                "Defaults to this session. An alias matching more than one live session is refused " +
+                "rather than guessed — use an id.",
+            },
             force: {
               type: "boolean",
               description:
@@ -299,7 +305,12 @@ export default function createRolesPlugin() {
           type: "object",
           properties: {
             role: { type: "string", description: "Role name to release" },
-            from: { type: "string", description: "Session name or id (default: this session)" },
+            from: {
+              type: "string",
+              description:
+                "Session to release from: either the alias shown by list_relay_agents, or a session " +
+                "id. Defaults to this session.",
+            },
             force: {
               type: "boolean",
               description: "Required to release a role held by another session. Human approval only.",
@@ -319,6 +330,15 @@ export default function createRolesPlugin() {
 
           if (!rolesOf(target.agent).includes(role)) {
             return success(`"${target.agent.name}" does not hold "${role}" — nothing to release.`);
+          }
+          // Decided here rather than left to the transport, so the refusal names the
+          // session the way the caller addressed it and says what to do about it —
+          // matching assign_role, which applies the same rule.
+          if (target.agent.id !== self.id && !force) {
+            return failure(
+              `Releasing "${role}" from "${target.agent.name}" writes another session, not this ` +
+                `one. Pass force: true if that is intended.`,
+            );
           }
           const failed = await write(target.agent.id, role, null, force);
           if (failed) return failed;
@@ -356,25 +376,40 @@ export default function createRolesPlugin() {
             );
           }
           const holder = holders[0];
-
-          // Through the relay API, never the transport — that is what runs the
-          // interceptor chain, so a role-addressed message is treated exactly like
-          // any other.
-          const res = await relay.sendMessage({ to: holder.id, content });
-          if (!res || !res.ok) {
-            return failure(`Could not send to "${role}": ${(res && res.error) || "unknown error"}`);
-          }
-          // Disclose a split rather than picking silently: two holders means an
-          // assignment raced, and the caller should know their message went to one of
-          // them rather than to "the" holder.
           const contested =
             holders.length > 1
               ? ` ${holders.length} sessions currently hold "${role}"; this went to the most ` +
                 `recently assigned. Use assign_role to settle it.`
               : "";
+
+          // Checked BEFORE sending, because core refuses a self-send with a message
+          // about self-sending — which would swallow the contested warning for the one
+          // caller who most needs it: the holder who thinks they are the only one.
+          if (holder.id === self.id) {
+            const alsoHeld =
+              holders.length > 1
+                ? ` Note ${holders.length - 1} other session(s) also hold it — use assign_role to ` +
+                  `settle it, or send_message to address one of them directly.`
+                : "";
+            return failure(
+              `You hold "${role}" yourself, so there is nobody else to send to.${alsoHeld}`,
+            );
+          }
+
+          const res = await relay.sendMessage({ to: holder.id, content });
+          if (!res || !res.ok) {
+            return failure(`Could not send to "${role}": ${(res && res.error) || "unknown error"}`);
+          }
+          // Through the relay API, never the transport — that is what runs the
+          // interceptor chain, so a role-addressed message is treated exactly like
+          // any other.
+          //
+          // Deliberately does not promise a reply. Delivery is durable and the roster is
+          // heartbeat-based, so the holder may be a session that has stopped running and
+          // has not yet aged out — the message waits rather than arriving.
           return success(
             `Message sent to "${holder.name}", who holds "${role}" (id: ${res.id}). ` +
-              `Any reply arrives automatically as a new turn — do not poll.${contested}`,
+              `A reply, if one comes, arrives automatically as a new turn — do not poll.${contested}`,
           );
         },
       },
