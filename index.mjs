@@ -1,4 +1,5 @@
 import { loadEnvFile } from "./env-file.mjs";
+import createRolesPlugin from "./roles.mjs";
 
 // A plugin owns all of its own configuration. Load this plugin's gitignored
 // `.env` into process.env at import time — BEFORE the factory below reads
@@ -69,19 +70,16 @@ export default function createPlugin(ctx) {
   const { env = process.env, dataDir = null, log = () => {} } = ctx ?? {};
   void env;
   void dataDir;
-  void log;
+
+  const roles = createRolesPlugin();
 
   return {
     name: "agent-relay-experimental",
-    // A pass-through interceptor: the smallest registration core accepts, and the
-    // current state of this plugin until a capability lands here. A Registration
-    // declaring nothing usable is rejected at load time.
-    interceptors: [
-      {
-        onSend(message, next) {
-          return next(message);
-        },
-      },
-    ],
+    tools: roles.tools,
+    briefing: roles.briefing,
+    // The relay handle and this session's identity only exist at activation, which
+    // is why roles cannot be set up here: a role is a fact about *this* session, and
+    // at factory time the session does not yet know who it is.
+    activate: (activationCtx) => roles.activate({ ...activationCtx, log }),
   };
 }
