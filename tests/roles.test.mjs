@@ -411,3 +411,30 @@ test("send_to_role does not promise a reply it cannot guarantee", async () => {
   assert.equal(res.resultType, "success");
   assert.match(res.textResultForLlm, /if one comes/);
 });
+
+test("a release that fails part-way says the role moved to whoever is left", async () => {
+  // With several holders this does NOT leave the role unheld: the ones not yet
+  // reached still hold it, and since holders are released newest-first it now
+  // resolves to an OLDER session than before the call. Reporting only the transport
+  // error would leave the caller believing nothing moved.
+  const agents = [
+    agent("s-me", "loon"),
+    agent("s-a", "gull", { "code-owner": "2026-01-01" }),
+    agent("s-b", "tern", { "code-owner": "2026-02-02" }),
+  ];
+  const { tool, relay } = await up(agents);
+  let calls = 0;
+  const real = relay.setAttributes;
+  relay.setAttributes = async (args) =>
+    ++calls === 2 ? { ok: false, error: "transport unavailable" } : real(args);
+
+  const res = await tool("assign_role").handler({ role: "code-owner", force: true });
+
+  assert.equal(res.resultType, "failure");
+  assert.match(res.textResultForLlm, /taken from "tern"/, "must name who was stripped");
+  assert.match(res.textResultForLlm, /resolves to "gull"/, "must name who it landed on");
+  assert.match(res.textResultForLlm, /assign_role again/);
+  // And that is genuinely the state: gull still holds it, loon never got it.
+  assert.ok("role.code-owner" in relay.agents[1].attributes);
+  assert.ok(!("role.code-owner" in relay.agents[0].attributes));
+});

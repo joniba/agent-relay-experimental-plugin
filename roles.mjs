@@ -45,6 +45,9 @@ function normalizeRole(raw) {
 const failure = (textResultForLlm) => ({ textResultForLlm, resultType: "failure" });
 const success = (textResultForLlm) => ({ textResultForLlm, resultType: "success" });
 
+/** Names as `"a" and "b"` — these strings are read by a model, so they read as prose. */
+const list = (names) => names.map((n) => `"${n}"`).join(" and ");
+
 /** Every role an agent entry currently publishes. */
 function rolesOf(agent) {
   const attributes = (agent && agent.attributes) || {};
@@ -272,11 +275,28 @@ export default function createRolesPlugin() {
           // unheld rather than doubly held. An unheld role fails loudly on the next
           // send_to_role; a doubly held one silently routes to one of them.
           const released = [];
-          for (const holder of holders) {
+          for (const [i, holder] of holders.entries()) {
             if (holder.id === target.agent.id) continue;
             const failed = await write(holder.id, role, null, force);
-            if (failed) return failed;
-            released.push(holder.name);
+            if (!failed) {
+              released.push(holder.name);
+              continue;
+            }
+            // With several holders, failing part-way does NOT leave the role unheld —
+            // the ones not yet reached still hold it, and since holders are released
+            // newest-first the role now resolves to an OLDER session than before the
+            // call. Saying only "could not update roles" would leave the caller
+            // believing nothing moved while send_to_role quietly routes somewhere new.
+            if (!released.length) return failed;
+            const remaining = holders
+              .slice(i)
+              .filter((h) => h.id !== target.agent.id)
+              .map((h) => h.name);
+            return failure(
+              `${failed.textResultForLlm} "${role}" was taken from ${list(released)} but not ` +
+                `from ${list(remaining)}, so it now resolves to "${remaining[0]}" instead of ` +
+                `"${target.agent.name}" — run assign_role again to settle it.`,
+            );
           }
 
           const failed = await write(target.agent.id, role, new Date().toISOString(), force);
@@ -284,17 +304,13 @@ export default function createRolesPlugin() {
             return released.length
               ? failure(
                   `${failed.textResultForLlm} "${role}" was already taken from ` +
-                    `${released.map((n) => `"${n}"`).join(" and ")}, so nobody holds it now — ` +
-                    `assign it again.`,
+                    `${list(released)}, so nobody holds it now — assign it again.`,
                 )
               : failed;
           }
 
           if (!released.length) return success(`"${target.agent.name}" now holds "${role}".`);
-          return success(
-            `"${role}" moved from ${released.map((n) => `"${n}"`).join(" and ")} to ` +
-              `"${target.agent.name}".`,
-          );
+          return success(`"${role}" moved from ${list(released)} to "${target.agent.name}".`);
         },
       },
       {
