@@ -4,3 +4,7 @@ bin/
 
 # In-repo git worktrees (feature work) — never tracked.
 worktrees/
+
+# scratch file for composing commit messages
+.commitmsg
+
