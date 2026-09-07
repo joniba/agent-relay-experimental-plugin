@@ -1,4 +1,5 @@
 import { loadEnvFile } from "./env-file.mjs";
+import createRolesPlugin from "./roles.mjs";
 
 // A plugin owns all of its own configuration. Load this plugin's gitignored
 // `.env` into process.env at import time — BEFORE the factory below reads
@@ -25,23 +26,30 @@ export function stripControl(s) {
  * The plugin factory — an agent-relay plugin DEFAULT-exports one of these.
  *
  * Core calls it once at startup with `ctx` and folds the returned **Registration**
- * into its seam registry. A Registration may declare any subset of exactly four
+ * into its seam registry. A Registration may declare any subset of these
  * capabilities, and nothing else:
  *
  * ```js
  * {
- *   interceptors: [ { onSend?, onReceive?, renderPrompt? } ], // AGGREGATE — every plugin's, in load order
- *   transport:    { id?, create(ctx) },                       // single-instance, LAST-loaded wins
- *   credentials:  () => ({ get() {} }),                       // single-instance, LAST-loaded wins
- *   identity:     { resolve(session) },                       // single-instance, LAST-loaded wins
+ *   tools:        [ { name, description, parameters, handler } ], // AGGREGATE — appended to core's own
+ *   briefing:     "…text…",                                      // AGGREGATE — appended to the session briefing
+ *   interceptors: [ { onSend?, onReceive?, renderPrompt? } ],     // AGGREGATE — every plugin's, in load order
+ *   activate:     ({ relay, self }) => {},                        // once, after this session registers
+ *   transport:    { id?, create(ctx) },                           // single-instance, LAST-loaded wins
+ *   credentials:  () => ({ get() {} }),                           // single-instance, LAST-loaded wins
+ *   identity:     { resolve(session) },                           // single-instance, LAST-loaded wins
  * }
  * ```
  *
  * Notes that are easy to get wrong:
  *
- * - **Tools cannot come from a plugin.** The `send_message` / `list_relay_agents`
- *   tool surface lives in core. A plugin extends behaviour through the four
- *   capabilities above; it cannot register a new tool or change a tool's schema.
+ * - **Tools and briefing travel together.** A tool nobody can discover is a tool
+ *   nobody calls, and for an LLM consumer the briefing — not the tool list — is the
+ *   actual onboarding. A tool name may not collide with another plugin's or with
+ *   core's own; a collision aborts the load rather than shadowing.
+ * - **`activate` is the only point a plugin can act on the mesh it just joined.**
+ *   The factory runs before this session has an identity. A throw is contained: it
+ *   disables that plugin's tools with a durable error rather than killing the session.
  * - **`transport` is last-loaded-wins, and plugins load alphabetically.** If two
  *   installed plugins both declare a transport, only one survives. Prefer an
  *   interceptor when the goal is to shape messages rather than to own delivery.
@@ -52,7 +60,10 @@ export function stripControl(s) {
  *   `(message, next)`; call `next(message)` to pass it on, or return WITHOUT
  *   calling `next` to DROP it. To reject a message, drop it — never throw, since a
  *   throw is treated as poison and consumed. `renderPrompt` returns a string, or
- *   `null` to defer to the default renderer.
+ *   `null` to defer; the FIRST non-null result wins, so only one plugin's prompt is
+ *   ever used even though every renderer runs until one answers.
+ * - **A plugin is named by core**, from its folder or entry filename. A `name` on the
+ *   Registration is never read — do not rely on one.
  *
  * @param {{
  *   env?: NodeJS.ProcessEnv,
@@ -69,19 +80,16 @@ export default function createPlugin(ctx) {
   const { env = process.env, dataDir = null, log = () => {} } = ctx ?? {};
   void env;
   void dataDir;
-  void log;
+
+  const roles = createRolesPlugin();
 
   return {
     name: "agent-relay-experimental",
-    // A pass-through interceptor: the smallest registration core accepts, and the
-    // current state of this plugin until a capability lands here. A Registration
-    // declaring nothing usable is rejected at load time.
-    interceptors: [
-      {
-        onSend(message, next) {
-          return next(message);
-        },
-      },
-    ],
+    tools: roles.tools,
+    briefing: roles.briefing,
+    // The relay handle and this session's identity only exist at activation, which
+    // is why roles cannot be set up here: a role is a fact about *this* session, and
+    // at factory time the session does not yet know who it is.
+    activate: (activationCtx) => roles.activate({ ...activationCtx, log }),
   };
 }
