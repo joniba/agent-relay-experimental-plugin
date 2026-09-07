@@ -1,0 +1,21 @@
+Drop the config machinery this plugin never used
+
+env-file.mjs was inherited from the template and loaded on every import,
+but the plugin reads no configuration at all: the factory destructured
+env and immediately discarded it with a void statement. A role is a fact
+about a live session, held in the registry, so there is nothing to read
+from the environment and no .env to load.
+
+The factory now takes only the diagnostic logger, rather than accepting
+context it has no use for and voiding it -- which read as though the
+values mattered and had merely been forgotten.
+
+The pass-through interceptor raised alongside this is already gone; it
+was removed when roles landed. It survives only in the frozen template
+commit, whose skeleton needed it because interceptors were once the
+smallest registration core would accept. The README now says that
+outright, so the next person reading the template knows why it is there
+and that it no longer applies.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Copilot-Session: 601c36fc-e17d-49fb-8a9d-1bd58dd27797
