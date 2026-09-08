@@ -6,8 +6,7 @@
   "main": "index.mjs",
   "files": [
     "index.mjs",
-    "roles.mjs",
-    "env-file.mjs"
+    "roles.mjs"
   ],
   "agentRelay": {
     "entry": "index.mjs"

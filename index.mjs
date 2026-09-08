@@ -1,10 +1,4 @@
-import { loadEnvFile } from "./env-file.mjs";
 import createRolesPlugin from "./roles.mjs";
-
-// A plugin owns all of its own configuration. Load this plugin's gitignored
-// `.env` into process.env at import time — BEFORE the factory below reads
-// `ctx.env`. Shell-exported variables always win over the file.
-loadEnvFile();
 
 /**
  * Strip control characters from a peer-controlled string so it cannot forge line
@@ -77,9 +71,11 @@ export function stripControl(s) {
  * @returns {object} a Registration
  */
 export default function createPlugin(ctx) {
-  const { env = process.env, dataDir = null, log = () => {} } = ctx ?? {};
-  void env;
-  void dataDir;
+  // Only `log` is taken. This plugin has no configuration of its own: a role is a
+  // fact about a live session, held in the registry, so there is nothing to read from
+  // the environment and no `.env` to load. The rest of `ctx` is deliberately ignored
+  // rather than accepted and voided.
+  const { log = () => {} } = ctx ?? {};
 
   const roles = createRolesPlugin();
 

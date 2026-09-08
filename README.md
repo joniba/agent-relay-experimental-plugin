@@ -225,7 +225,6 @@ Things that surprise people:
 ```
 index.mjs        the factory — default export, plus any helpers it needs
 roles.mjs        the session-roles capability: tools, briefing, activation
-env-file.mjs     loads this plugin's own gitignored .env (a plugin owns its config)
 tests/           node --test, no test framework dependency
 package.json     name, agentRelay.entry, and the `files` install allowlist
 ```
@@ -242,18 +241,19 @@ deliberately excluded from the install.
 4. Extend `files` with any new directories the plugin needs at runtime.
 
 > The template commit is frozen, so its contract notes describe core as it was when the commit was
-> made — it predates plugin `tools`, `briefing` and `activate`, for instance. Take the skeleton from
-> it and the contract from the section above, which tracks the core this repo is built against.
+> made — it predates plugin `tools`, `briefing` and `activate`, for instance, which is why its
+> skeleton registers a do-nothing interceptor: back then that was the smallest thing core would
+> accept. It no longer is. Take the skeleton from the commit and the contract from the section above,
+> which tracks the core this repo is built against.
 
 ## Configuration
 
-A plugin owns all of its own configuration. Core reads settings only from the process environment and
-never loads a `.env` for you. `loadEnvFile()` fills gaps in `process.env` from, in order:
-`$AGENT_RELAY_ENV_FILE`, then `<plugin-dir>/.env`, then `<plugin-dir>/../.env`. Anything already
-exported in the shell wins.
+This plugin has none. A role is a fact about a live session, held in the registry, so there is
+nothing to read from the environment and no `.env` to load — the factory takes only the diagnostic
+logger and ignores the rest of its context.
 
-> **Gotcha:** double-quote any value containing `#`, or Node's `parseEnv` treats it as a comment and
-> truncates the value.
+A plugin that *does* need configuration owns all of it: core reads settings only from the process
+environment and never loads a `.env` on a plugin's behalf. See the pg plugin for that pattern.
 
 ## Install
 
